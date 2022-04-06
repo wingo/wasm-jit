@@ -115,7 +115,7 @@ struct Value;
 struct Func {
   struct Expr *body;
   void *jitCode;
-}
+};
 
 void recordJitCandidate(struct Func *func);
 uint8_t* flushJitCode(); // Call to actually generate JIT code.
