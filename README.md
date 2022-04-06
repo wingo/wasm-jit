@@ -1,7 +1,7 @@
-# WASI JIT workbench
+# WASM JIT workbench
 
 This repo is for artifacts related to run-time code generation for
-WebAssembly/WASI programs and components.
+WebAssembly programs and components.
 
 ## Background
 
@@ -52,22 +52,56 @@ With this in mind, our problem has two parts, then: (1) how to augment a
 WebAssembly module with a new function, and (2) how to get the original
 module to call the new code.
 
-### Late linking with Wizer
+### Late linking of auxiliary WebAssembly modules
 
-The key idea here is to build on
-[Wizer](https://github.com/bytecodealliance/wizer)'s ability to take a
-snapshot of a WebAssembly module.  We extend Wizer also to be able to
-augment the module with new code.  In this role, Wizer is effectively a
-late linker, linking in a new archive to an existing object.
+The key idea here is that to add code, the main program should generate
+a new WebAssembly module containing that code.  Then we run a linking
+phase to actually bring that new code to life and make it available.
 
 System linkers like `ld` typically require a complete set of symbols and
 relocations to resolve inter-archive references.  However when
 performing a late link of JIT-generated code, we can take a short-cut:
 the main program can embed memory addresses directly into the code it
-generates.
+generates.  Therefore the generated module will import memory from the
+main module.  All references from the generated code to the main module
+can be directly embedded in this way.
 
-So generated-to-main references don't need relocation.  However
-main-to-generated references do need to be resolved by Wizer.
+The generated module will also import the indirect function table from
+the main module.  (We will ensure that the main module exports its
+memory and indirect function table via the toolchain.)  When the main
+module makes the generated module, it also embeds a special `patch`
+function in the generated module.  This function will add the new
+functions to the main module's indirect function table, and perform any
+relocations onto the main module's memory.  All references from the main
+module to generated functions are installed via the `patch` function.
+
+We plan on two implementations of late linking, but both share the
+fundamental mechanism of a generated WebAssembly module with a `patch`
+function.
+
+#### Dynamic linking via the run-time
+
+One implementation of a linker is for the main module to cause the
+run-time to dynamically instantiate a new WebAssembly module.  The
+run-time would provide the memory and indirect function table from the
+main module as imports when instantiating the generated module.
+
+The advantage of dynamic linking is that it can update a live
+WebAssembly module without any need for re-instantiation or special
+run-time checkpointing support.
+
+#### Static linking via Wizer
+
+Another idea is to build on
+[Wizer](https://github.com/bytecodealliance/wizer)'s ability to take a
+snapshot of a WebAssembly module.  We will extend Wizer to also be able
+to augment a module with new code.  In this role, Wizer is effectively a
+late linker, linking in a new archive to an existing object.
+
+Wizer already needs the ability to instantiate a WebAssembly module and
+to run its code.  Causing Wizer to ask the module if it has any
+generated auxiliary module that should be instantiated, patched, and
+incorporated into the main module should not be a huge deal.
 
 ### Late linking appears to be async codegen
 
@@ -83,6 +117,9 @@ struct Func {
   void *jitCode;
 }
 
+void recordJitCandidate(struct Func *func);
+uint8_t* flushJitCode(); // Call to actually generate JIT code.
+
 struct Value* interpretCall(struct Expr *body,
                             struct Value *arg);
 
@@ -92,6 +129,7 @@ struct Value* call(struct Func *func,
     struct Value* (*f)(struct Value*) = jitCode;
     return f(val);
   } else {
+    recordJitCandidate(func);
     return interpretCall(func->body, val);
   }
 }
@@ -105,16 +143,27 @@ tell Wizer to do so, and Wizer could snapshot the program, link in the
 new function, and patch `&func->jitCode`.  From the program's
 perspective, it's as if the code becomes available asynchronously.
 
-### Protocol: WebAssembly modules
-
-Finally, the question is, how does a program communicate to Wizer about
-the set of functions to patch in, along with code locations to be
-patched?  The approach we are taking is to have the program generate
-full WebAssembly modules, as in the [Linking
-convention](https://github.com/WebAssembly/tool-conventions/blob/main/Linking.md#relocation-sections),
-with relocation sections indicating the locations in the main binary to
-patch.
-
 ## Usage
 
-to be continued...
+In this repository we have `interp.cc` which implements a little Scheme
+interpreter and JIT compiler.  Currently you run it like this:
+
+```
+$ g++ -Wall -o interp interp.cc
+$ ./interp '(letrec ((fib (lambda (n)
+                            (if (< n 2)
+                                1
+                                (+ (fib (- n 1))
+                                   (fib (- n 2)))))))
+               (fib 25))' /tmp/foo.wasm
+result: 121393
+compiling 0x55957e3e3170
+```
+
+The "compiling" phase generates a WebAssembly module with code for any
+function which was interpreted at run-time, written to the file given on
+the command line.  Next up will be compiling this file to a WASI library
+instead, running it via [the Python interface to
+wasmtime](https://github.com/bytecodealliance/wasmtime-py/), and trying
+the dynamic linking strategy.  Then we go on to implement Wizer static
+linking.
