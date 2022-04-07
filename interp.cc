@@ -8,12 +8,25 @@
 #include <string>
 #include <vector>
 
+#ifdef LIBRARY
+#define EXPORT(name) __attribute__((export_name(name)))
+void throw_error() __attribute__((noreturn))
+  __attribute__((import_module("env")))
+  __attribute__((import_name("throw_error")));
+#else
+#define EXPORT(name) /**/
+static void throw_error() __attribute__((noreturn));
+static void throw_error() {
+  exit(1);
+}
+#endif
+
 static void signal_error(const char* message, const char *what) {
   if (what)
     fprintf(stderr, "error: %s: %s\n", message, what);
   else
     fprintf(stderr, "error: %s\n", message);
-  exit(1);
+  throw_error();
 }
 
 class Expr {
@@ -301,7 +314,7 @@ public:
   }
 };
 
-static Expr* parse(const char *str) {
+static Expr* parse(const char *str) EXPORT("parse") {
   return Parser(str).parse();
 }
 
@@ -623,6 +636,8 @@ eval_primcall(Prim::Op op, intptr_t lhs, intptr_t rhs) {
 
 static std::set<Func*> jitCandidates;
 
+typedef Value (*JitFunction)(Env*, Heap*);
+
 static Value
 eval(Expr *expr, Env* unrooted_env, Heap& heap) {
   Rooted<Env> env(heap, unrooted_env);
@@ -653,18 +668,22 @@ tail:
     return Value(literal->val);
   }
   case Expr::Kind::Call: {
-    {
-      Call *call = static_cast<Call*>(expr);
-      Rooted<Value> func(heap, eval(call->func.get(), env.get(), heap));
-      if (!func.get().isClosure())
-        signal_error("call expected closure, got", func.get().kindName());
-      Rooted<Value> arg(heap, eval(call->arg.get(), env.get(), heap));
-      Closure *closure = func.get().asClosure();
+    Call *call = static_cast<Call*>(expr);
+    Rooted<Value> func(heap, eval(call->func.get(), env.get(), heap));
+    if (!func.get().isClosure())
+      signal_error("call expected closure, got", func.get().kindName());
+    Rooted<Value> arg(heap, eval(call->arg.get(), env.get(), heap));
+    Closure *closure = func.get().asClosure();
+    Rooted<Env> closure_env(heap, closure->env);
+    Env *call_env = new(heap) Env(closure_env, arg);
+    if (closure->func->jitCode) {
+      JitFunction f = reinterpret_cast<JitFunction>(closure->func->jitCode);
+      return f(call_env, &heap);
+    } else {
       expr = closure->func->body.get();
-      Rooted<Env> closure_env(heap, closure->env);
-      env.set(new(heap) Env(closure_env, arg));
+      env.set(call_env);
+      goto tail;
     }
-    goto tail;
   }
   case Expr::Kind::LetRec: {
     LetRec *letrec = static_cast<LetRec*>(expr);
@@ -689,6 +708,12 @@ tail:
     signal_error("unexpected expr kind", nullptr);
     return Value(nullptr);
   }
+}
+
+static void eval(Expr* expr) EXPORT("eval") {
+  Heap heap(1024 * 1024);
+  Value res = eval(expr, nullptr, heap);
+  fprintf(stdout, "result: %zu\n", res.getSmi());
 }
 
 enum class WasmSimpleBlockType : uint8_t {
@@ -1487,21 +1512,35 @@ public:
   }
 };
 
-static void flushJit(FILE *output) {
+struct WasmModule {
   std::vector<uint8_t> data;
+};
 
-  {
-    WasmCompiler comp;
-    for (Func *f : jitCandidates) {
-      fprintf(stderr, "compiling %p\n", f);
-      comp.compileFunction(f);
-    }
-    data = comp.finish();
+static WasmModule* jitModule() EXPORT("jitModule") {
+  if (jitCandidates.empty())
+    return nullptr;
+
+  WasmCompiler comp;
+  for (Func *f : jitCandidates) {
+    fprintf(stderr, "compiling %p\n", f);
+    comp.compileFunction(f);
   }
-  
-  fwrite(data.data(), data.size(), 1, output);
+  return new WasmModule{comp.finish()};
 }
 
+static uint8_t* moduleData(WasmModule* mod) EXPORT("moduleData") {
+  return mod->data.data();
+}
+static size_t moduleSize(WasmModule* mod) EXPORT("moduleSize") {
+  return mod->data.size();
+}
+static void freeModule(WasmModule* mod) EXPORT("freeModule") {
+  delete mod;
+}
+
+#ifdef LIBRARY
+int main () {}
+#else
 int main (int argc, char *argv[]) {
   if (argc != 3) {
     fprintf(stderr, "usage: %s EXPR OUT\n", argv[0]);
@@ -1509,23 +1548,17 @@ int main (int argc, char *argv[]) {
   }
   
   Expr *expr = parse(argv[1]);
-  Heap heap(1024 * 1024);
-  Value res = eval(expr, nullptr, heap);
-
-  fprintf(stdout, "result: %zu\n", res.getSmi());
+  eval(expr);
   
-  FILE *o = fopen(argv[2], "w");
-  flushJit(o);
-  fclose(o);
+  WasmModule *mod = jitModule();
+  if (mod) {
+    fprintf(stderr, "Writing generated WebAssembly module to %s\n", argv[2]);
+    FILE *o = fopen(argv[2], "w");
+    fwrite(moduleData(mod), moduleSize(mod), 1, o);
+    fclose(o);
+    freeModule(mod);
+  }
 
   return 0;
 }
-
-/*
-((function (fib n)
-   (if (< n 2)
-       1
-       (+ (fib (- n 2))
-          (fib (- n 1)))))
- 32)
-*/
+#endif
