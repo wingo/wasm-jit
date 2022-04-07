@@ -845,6 +845,14 @@ struct WasmAssembler : public WasmWriter {
     I32Shl = 0x74,
     I32ShrS = 0x75,
     I32ShrU = 0x76,
+
+    RefNull = 0xd0,
+
+    MiscPrefix = 0xfc,
+  };
+  enum class MiscOp : uint8_t {
+    TableGrow = 0x0f,
+    TableInit = 0x0c,
   };
   void emitOp(Op op) { emit(static_cast<uint8_t>(op)); }
 
@@ -906,6 +914,24 @@ struct WasmAssembler : public WasmWriter {
     emitVarU32(table);
   }
 
+  void emitRefNull(WasmValType type) {
+    emitOp(Op::RefNull);
+    emitValType(type);
+  }
+  void emitMiscOp(MiscOp op) {
+    emitOp(Op::MiscPrefix);
+    emit(static_cast<uint8_t>(op));
+  }
+  void emitTableGrow(uint32_t idx) {
+    emitMiscOp(MiscOp::TableGrow);
+    emitVarU32(idx);
+  }
+  void emitTableInit(uint32_t dst, uint32_t src) {
+    emitMiscOp(MiscOp::TableInit);
+    emitVarU32(dst);
+    emitVarU32(src);
+  }
+
   void emitBlock() {
     emitOp(Op::Block);
     emit(static_cast<uint8_t>(WasmSimpleBlockType::Void));
@@ -961,6 +987,11 @@ struct WasmModuleWriter : WasmWriter {
     HasMaximum = 0x1,
     IsShared = 0x2,
     IsI64 = 0x4,
+  };
+
+  enum class ElemSegmentKind : uint8_t {
+    Active = 0x0,
+    Passive = 0x1
   };
 
   void emitMagic() {
@@ -1020,6 +1051,26 @@ struct WasmModuleWriter : WasmWriter {
       emitVarU32(func.typeIdx);
     patchVarU32(patchLoc, code.size() - start);
   }
+  void emitElementSection(const std::vector<uint32_t>& indirectFunctions) {
+    if (indirectFunctions.empty()) return;
+    emitSectionId(SectionId::Elem);
+    size_t patchLoc = emitPatchableVarU32();
+    size_t start = code.size();
+    emitVarU32(1);
+    emit(static_cast<uint8_t>(ElemSegmentKind::Passive));
+    emit(0x00); // elemkind: funcref
+    emitVarU32(indirectFunctions.size());
+    for (auto idx : indirectFunctions)
+      emitVarU32(idx);
+    patchVarU32(patchLoc, code.size() - start);
+  }
+  void emitStartSection(uint32_t startFunction) {
+    emitSectionId(SectionId::Start);
+    size_t patchLoc = emitPatchableVarU32();
+    size_t start = code.size();
+    emitVarU32(startFunction);
+    patchVarU32(patchLoc, code.size() - start);
+  }
   std::vector<uint8_t> encodeLocals(const std::vector<WasmValType> &locals) {
     uint32_t runs = 0;
     {
@@ -1064,7 +1115,8 @@ struct WasmModuleWriter : WasmWriter {
 struct WasmModuleBuilder {
   std::vector<WasmFuncType> types;
   std::vector<WasmFunc> functions;
-  // std::vector<Reloc> relocs;
+  std::vector<uint32_t> indirectFunctionTable;
+  uint32_t startFunction = -1;
 
   size_t internFuncType(const WasmResultType& params,
                         const WasmResultType& results) {
@@ -1093,6 +1145,14 @@ struct WasmModuleBuilder {
     return functions.size() - 1;
   }
   
+  void addIndirectFunction(uint32_t idx) {
+    indirectFunctionTable.push_back(idx);
+  }
+
+  void recordStartFunction(uint32_t idx) {
+    startFunction = idx;
+  }
+
   std::vector<uint8_t> finish() {
     WasmModuleWriter writer;
     writer.emitMagic();
@@ -1100,6 +1160,9 @@ struct WasmModuleBuilder {
     writer.emitTypeSection(types);
     writer.emitImportSection();
     writer.emitFunctionSection(functions);
+    if (startFunction != uint32_t(-1))
+      writer.emitStartSection(startFunction);
+    writer.emitElementSection(indirectFunctionTable);
     writer.emitCodeSection(functions);
     return writer.finish();
   }
@@ -1107,22 +1170,34 @@ struct WasmModuleBuilder {
 
 struct VMCall {
   static void* Allocate(Heap* heap, size_t bytes) {
+    //fprintf(stderr, "Allocate(%p, %zu)\n", heap, bytes);
     return heap->allocate(bytes);
   }
-  static size_t PushRoot(Heap* heap, Value v) {
-    return Heap::pushRoot(heap, v);
+  static size_t PushRoot(Value v, Heap* heap) {
+    //fprintf(stderr, "PushRoot(%lx, %p)", v.bits(), heap);
+    size_t ret = Heap::pushRoot(heap, v);
+    //fprintf(stderr, "-> %zu\n", ret);
+    return ret;
   }
   static Value GetRoot(Heap* heap, size_t idx) {
+    //fprintf(stderr, "GetRoot(%p, %zu)\n", heap, idx);
     return Heap::getRoot(heap, idx);
   }
   static void PopRoots(Heap* heap, size_t n) {
+    //fprintf(stderr, "PopRoots(%p, %zu)\n", heap, n);
     while (n--)
       Heap::popRoot(heap);
   }
   static void Error(const char *msg, const char *what) {
+    fprintf(stderr, "Error(%s, %s)\n", msg, what);
     signal_error(msg, what);
   }
+  static uintptr_t Debug(uintptr_t v, const char *what) {
+    fprintf(stderr, "Debug(%s: %zx)\n", what, v);
+    return v;
+  }
   static Value Eval(Expr *expr, Env *env, Heap *heap) {
+    fprintf(stderr, "Eval(%p, %p, %p)\n", expr, env, heap);
     return eval(expr, env, *heap);
   }
 };
@@ -1134,12 +1209,15 @@ struct VMCallTypes {
   uint32_t GetRoot;
   uint32_t PopRoots;
   uint32_t Error;
+  uint32_t Debug;
   uint32_t Eval;
   uint32_t JitCall;
+  uint32_t StartFunction;
 };
 
 struct WasmMacroAssembler : public WasmAssembler {
   WasmModuleBuilder moduleBuilder;
+  std::vector<void*> relocs; // *relocs[i] = elements[i];
   VMCallTypes vmCallTypes;
   size_t maxRoots;
   size_t currentRootCount;
@@ -1195,6 +1273,7 @@ struct WasmMacroAssembler : public WasmAssembler {
     emitLocalTee(local);
     emitHeap();
     emitVMCall(&VMCall::PushRoot, vmCallTypes.PushRoot);
+    emitLocalSet(local);
     return local;
   }
   void emitLoadGCRoot(uint32_t local) {
@@ -1227,6 +1306,11 @@ struct WasmMacroAssembler : public WasmAssembler {
     emitPushConstantPointer(what);
     emitVMCall(&VMCall::Error, vmCallTypes.Error);
     emitUnreachable();
+  }
+
+  void emitDebug(const char *what) {
+    emitPushConstantPointer(what);
+    emitVMCall(&VMCall::Debug, vmCallTypes.Debug);
   }
 
   void emitCheckSmi(size_t localIdx, const char *what) {
@@ -1278,19 +1362,22 @@ struct WasmMacroAssembler : public WasmAssembler {
   void emitHeapObjectToValue() {}
 
   void initializeVMCallTypes() {
-    size_t Call_2_1 = moduleBuilder.internFuncType(
-        {WasmValType::I32, WasmValType::I32}, {WasmValType::I32});
+    size_t Call_0_0 = moduleBuilder.internFuncType({}, {});
     size_t Call_2_0 = moduleBuilder.internFuncType(
         {WasmValType::I32, WasmValType::I32}, {});
+    size_t Call_2_1 = moduleBuilder.internFuncType(
+        {WasmValType::I32, WasmValType::I32}, {WasmValType::I32});
     size_t Call_3_1 = moduleBuilder.internFuncType(
         {WasmValType::I32, WasmValType::I32, WasmValType::I32}, {WasmValType::I32});
     vmCallTypes.Allocate = Call_2_1; // Heap, size -> void*
-    vmCallTypes.PushRoot = Call_2_1; // Heap, V -> idx
+    vmCallTypes.PushRoot = Call_2_1; // V, Heap -> idx
     vmCallTypes.GetRoot = Call_2_1;  // Heap, idx -> V
     vmCallTypes.PopRoots = Call_2_0; // Heap, n -> ()
     vmCallTypes.Error = Call_2_0; // Heap, n -> ()
+    vmCallTypes.Debug = Call_2_1; // V, msg -> V
     vmCallTypes.Eval = Call_3_1; // Expr, Env, Heap -> Val
     vmCallTypes.JitCall = Call_2_1; // Env, Heap -> Val
+    vmCallTypes.StartFunction = Call_0_0; // () -> ()
     
     vmCallTypes.initialized = true;
   }
@@ -1310,7 +1397,46 @@ struct WasmMacroAssembler : public WasmAssembler {
     return moduleBuilder.addFunction(vmCallTypes.JitCall, locals, finish());
   }
 
+  void recordRelocation(void *address, uint32_t funcIdx) {
+    moduleBuilder.addIndirectFunction(funcIdx);
+    relocs.push_back(address);
+  }
+
+  void emitRelocations() {
+    uint32_t count = relocs.size();
+    beginFunction();
+    locals.push_back(WasmValType::I32);
+    uint32_t base = 0;
+    emitRefNull(WasmValType::FuncRef);
+    emitI32Const(count);
+    emitTableGrow(0);
+    emitLocalSet(base);
+
+    // Append funcrefs from local element section to main indirect function
+    // table.
+    emitLocalGet(base);  // dst offset: pre-growth size of imported table
+    emitI32Const(0);     // src offset
+    emitI32Const(count); // count
+    emitTableInit(0, 0);
+
+    // Patch memory to refer to new indirect function table entries.
+    for (uint32_t i = 0; i < count; i++) {
+      emitI32Const(reinterpret_cast<intptr_t>(relocs[i]));
+      emitLocalGet(base);
+      emitI32Const(i);
+      emitI32Add();
+      emitI32Store();
+    }
+
+    emitEnd();
+    uint32_t offset = moduleBuilder.addFunction(vmCallTypes.StartFunction,
+                                                locals, finish());
+    moduleBuilder.recordStartFunction(offset);
+    relocs.clear();
+  }
+
   std::vector<uint8_t> endModule() {
+    emitRelocations();
     return moduleBuilder.finish();
   }
 };
@@ -1396,7 +1522,8 @@ class WasmCompiler {
       masm.emitLocalTee(unrootedEnv);
       masm.emitHeapObjectInitTag(HeapObject::Kind::Env);
       masm.emitLocalGet(unrootedEnv);
-      masm.emitLoadGCRoot(envRoot);
+      masm.emitLoadGCRoot(callee);
+      masm.emitLoadPointer(Closure::offsetOfEnv());
       masm.emitStorePointer(Env::offsetOfPrev());
       masm.emitLocalGet(unrootedEnv);
       masm.emitLoadGCRoot(arg);
@@ -1478,6 +1605,7 @@ class WasmCompiler {
         masm.emitBlock(WasmValType::I32);
         masm.emitBlock();
         masm.emitLocalGet(test);
+        masm.emitValueToSmi();
         masm.releaseLocal();
       }
       masm.emitBrIf(0);
@@ -1496,7 +1624,7 @@ class WasmCompiler {
 public:
   WasmCompiler() = default;
 
-  size_t compileFunction(Func *func) {
+  void compileFunction(Func *func) {
     // Function type is (Env*, Heap*) -> Value, all of which are i32
     masm.beginFunction();
     // Prelude: root incoming environment.
@@ -1504,8 +1632,8 @@ public:
     uint32_t env = masm.emitStoreGCRoot();
     compile(func->body.get(), env);
     masm.emitPopGCRootsAndReleaseLocals(1);
-    // FIXME: Add reloc for &func->jit to this code.
-    return masm.endFunction();
+    size_t offset = masm.endFunction();
+    masm.recordRelocation(&func->jitCode, offset);
   }
 
   std::vector<uint8_t> finish() {

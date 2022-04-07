@@ -11,7 +11,7 @@ wasmtime.loader.store.set_wasi(wasi)
 # WASI command.
 interplib._initialize()
 
-# /opt/wasi-sdk/bin/clang++ -mexec-model=reactor -Wl,--export-table -DLIBRARY=1 -Wall -fno-exceptions interp.cc -o interplib.wasm && python3 interp.py
+# /opt/wasi-sdk/bin/clang++ -mexec-model=reactor -Wl,--growable-table -Wl,--export-table -DLIBRARY=1 -Wall -fno-exceptions interp.cc -o interplib.wasm && python3 interp.py
 
 def fib_program(count):
     return f"""
@@ -74,6 +74,7 @@ print(f'jitModule result: {jit_module}')
 
 wasmtime.loader.linker.define("env", "memory", interplib.memory)
 wasmtime.loader.linker.define("env", "__indirect_function_table", interplib.__indirect_function_table)
+print(f'Instantiating and patching in JIT module')
 instance = wasmtime.loader.linker.instantiate(wasmtime.loader.store, jit_module)
 
 print(f'Calling eval({fib_expr:#x}) 5 times')
