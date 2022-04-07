@@ -1,3 +1,4 @@
+import time
 from wasmtime import Engine, Store, Module, Instance, Func, FuncType, Linker, WasiConfig, Config
 import wasmtime.loader
 import interplib
@@ -43,7 +44,7 @@ def parse(string):
     return expr
 
 def eval(expr):
-    return interplib.eval(expr)
+    return interplib.eval(expr, 1024 * 1024)
 
 def jitModule():
     ptr = interplib.jitModule()
@@ -58,15 +59,17 @@ def jitModule():
     interplib.freeModule(ptr)
     return Module(wasmtime.loader.store.engine, dst)
 
-fib_code = fib_program(25)
+fib_code = fib_program(30)
 
 print(f'Parsing: {fib_code}')
-fib_expr = parse(fib_program(25))
+fib_expr = parse(fib_code)
 print(f'Parse result: {fib_expr:#x}')
 
 print(f'Calling eval({fib_expr:#x}) 5 times')
+start_time = time.time()
 for i in range(0,5):
     eval(fib_expr)
+print(f'Calling eval({fib_expr:#x}) 5 times took {time.time() - start_time}s.')
 
 print('Calling jitModule()')
 jit_module = jitModule()
@@ -78,5 +81,7 @@ print(f'Instantiating and patching in JIT module')
 instance = wasmtime.loader.linker.instantiate(wasmtime.loader.store, jit_module)
 
 print(f'Calling eval({fib_expr:#x}) 5 times')
+start_time = time.time()
 for i in range(0,5):
     eval(fib_expr)
+print(f'Calling eval({fib_expr:#x}) 5 times took {time.time() - start_time}s.')

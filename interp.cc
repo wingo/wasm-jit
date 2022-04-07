@@ -711,8 +711,8 @@ tail:
 }
 
 EXPORT("eval")
-void eval(Expr* expr) {
-  Heap heap(1024 * 1024);
+void eval(Expr* expr, size_t heap_size) {
+  Heap heap(heap_size);
   Value res = eval(expr, nullptr, heap);
   fprintf(stdout, "result: %zu\n", res.getSmi());
 }
@@ -1677,7 +1677,7 @@ int main (int argc, char *argv[]) {
   }
   
   Expr *expr = parse(argv[1]);
-  eval(expr);
+  eval(expr, 1024 * 1024);
   
   WasmModule *mod = jitModule();
   if (mod) {
