@@ -5,6 +5,7 @@
 #include <cstring>
 #include <memory>
 #include <set>
+#include <string>
 #include <vector>
 
 static void signal_error(const char* message, const char *what) {
@@ -395,13 +396,12 @@ class Heap {
   HeapObject* copy(HeapObject *obj);
   size_t scan(HeapObject *obj);
 
-  void visitRoot(Value *root);
+  void visitRoots();
 
   void collect() {
     flip();
     uintptr_t grey = hp;
-    for (Value& v : roots)
-      visitRoot(&v);
+    visitRoots();
     while(grey < hp)
       grey += alignUp(scan(reinterpret_cast<HeapObject*>(grey)));
   }
@@ -600,10 +600,10 @@ size_t Heap::scan(HeapObject *obj) {
   }
 }
 
-void Heap::visitRoot(Value *root) {
-  root->visitFields(*this);
+void Heap::visitRoots() {
+  for (Value& root : roots)
+    root.visitFields(*this);
 }
-
 
 static Value
 eval_primcall(Prim::Op op, intptr_t lhs, intptr_t rhs) {
@@ -690,11 +690,6 @@ tail:
     return Value(nullptr);
   }
 }
-
-// WebAssembly type encodings are all single-byte negative SLEB128s, hence:
-//  forall tc:TypeCode. ((tc & SLEB128SignMask) == SLEB128SignBit
-static const uint8_t SLEB128SignMask = 0xc0;
-static const uint8_t SLEB128SignBit = 0x40;
 
 enum class WasmSimpleBlockType : uint8_t {
   Void = 0x40,  // SLEB128(-0x40)
