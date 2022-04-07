@@ -146,24 +146,75 @@ perspective, it's as if the code becomes available asynchronously.
 ## Usage
 
 In this repository we have `interp.cc` which implements a little Scheme
-interpreter and JIT compiler.  Currently you run it like this:
+interpreter and JIT compiler.  You compile it like this:
 
 ```
-$ g++ -Wall -o interp interp.cc
-$ ./interp '(letrec ((fib (lambda (n)
-                            (if (< n 2)
-                                1
-                                (+ (fib (- n 1))
-                                   (fib (- n 2)))))))
-               (fib 25))' /tmp/foo.wasm
-result: 121393
-compiling 0x55957e3e3170
+$ /opt/wasi-sdk/bin/clang++ -O2 -Wall \
+   -mexec-model=reactor \
+   -Wl,--growable-table \
+   -Wl,--export-table \
+   -DLIBRARY=1 \
+   -fno-exceptions \
+   interp.cc -o interplib.wasm
 ```
 
-The "compiling" phase generates a WebAssembly module with code for any
-function which was interpreted at run-time, written to the file given on
-the command line.  Next up will be compiling this file to a WASI library
-instead, running it via [the Python interface to
-wasmtime](https://github.com/bytecodealliance/wasmtime-py/), and trying
-the dynamic linking strategy.  Then we go on to implement Wizer static
-linking.
+We compile with the WASI SDK.  I have version 14.
+
+The `-mexec-model=reactor` means that this WASI module isn't just a
+run-once thing, after which its state is torn down; rather it's a
+multiple-entry component.
+
+The two `-Wl,` options tell the linker to export the indirect function
+table, and to allow the indirect function table to be augmented by the
+JIT module.
+
+The `-DLIBRARY=1` is used by `interp.cc`; you can actually run and debug
+it natively but that's just for development.  We're instead compiling to
+wasm and running with a WASI environment (wasmtime).
+
+The `-fno-exceptions` is because WASI doesn't support exceptions
+currently.  Also we don't need them.
+
+To run the module, we have a little harness that uses the [the Python
+interface to
+wasmtime](https://github.com/bytecodealliance/wasmtime-py/).  That
+harness includes a little factorial function as an example program.
+
+```
+$ python3 interp.py
+Parsing: 
+(letrec ((fib (lambda (n)
+               (if (< n 2)
+                   1
+                   (+ (fib (- n 1))
+                      (fib (- n 2)))))))
+  (fib 30))
+
+Parse result: 0x11eb0
+Calling eval(0x11eb0) 5 times
+result: 1346269
+result: 1346269
+result: 1346269
+result: 1346269
+result: 1346269
+Calling eval(0x11eb0) 5 times took 2.3992819786071777s.
+Calling jitModule()
+jitModule result: <wasmtime._module.Module object at 0x7f2bef0821c0>
+Instantiating and patching in JIT module
+Calling eval(0x11eb0) 5 times
+result: 1346269
+result: 1346269
+result: 1346269
+result: 1346269
+result: 1346269
+Calling eval(0x11eb0) 5 times took 1.3382737636566162s.
+```
+
+After calling eval the first five times, we ask the module to generate
+any JIT code that it would like.  Then we instantiate that JIT code,
+patch it into memory, and run the eval test 5 more times.  This time the
+interpreter sees that there is JIT code and runs it instead.  The result
+is the same but we get it faster.
+
+The next task here is to implement linking via Wizer, but already this
+is a good proof that you can indeed JIT with WASM :)

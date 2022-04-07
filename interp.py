@@ -12,7 +12,7 @@ wasmtime.loader.store.set_wasi(wasi)
 # WASI command.
 interplib._initialize()
 
-# /opt/wasi-sdk/bin/clang++ -mexec-model=reactor -Wl,--growable-table -Wl,--export-table -DLIBRARY=1 -Wall -fno-exceptions interp.cc -o interplib.wasm && python3 interp.py
+# /opt/wasi-sdk/bin/clang++ -O2 -mexec-model=reactor -Wl,--growable-table -Wl,--export-table -DLIBRARY=1 -Wall -fno-exceptions interp.cc -o interplib.wasm && python3 interp.py
 
 def fib_program(count):
     return f"""
