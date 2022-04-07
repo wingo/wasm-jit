@@ -14,7 +14,7 @@ void throw_error() __attribute__((noreturn))
   __attribute__((import_module("env")))
   __attribute__((import_name("throw_error")));
 #else
-#define EXPORT(name) /**/
+#define EXPORT(name) static
 static void throw_error() __attribute__((noreturn));
 static void throw_error() {
   exit(1);
@@ -314,10 +314,10 @@ public:
   }
 };
 
-static Expr* parse(const char *str) EXPORT("parse") {
+EXPORT("parse")
+Expr* parse(const char *str) {
   return Parser(str).parse();
 }
-
 
 #define FOR_EACH_HEAP_OBJECT_KIND(M) \
   M(env, Env) \
@@ -710,7 +710,8 @@ tail:
   }
 }
 
-static void eval(Expr* expr) EXPORT("eval") {
+EXPORT("eval")
+void eval(Expr* expr) {
   Heap heap(1024 * 1024);
   Value res = eval(expr, nullptr, heap);
   fprintf(stdout, "result: %zu\n", res.getSmi());
@@ -1003,7 +1004,7 @@ struct WasmModuleWriter : WasmWriter {
     emit(static_cast<uint8_t>(LimitsFlags::Default));
     emitVarU32(0);
     emitName("env");
-    emitName("indirect_call_table");
+    emitName("__indirect_function_table");
     emit(static_cast<uint8_t>(DefinitionKind::Table));
     emitValType(WasmValType::FuncRef);
     emit(static_cast<uint8_t>(LimitsFlags::Default));
@@ -1516,30 +1517,30 @@ struct WasmModule {
   std::vector<uint8_t> data;
 };
 
-static WasmModule* jitModule() EXPORT("jitModule") {
+EXPORT("jitModule")
+WasmModule* jitModule() {
   if (jitCandidates.empty())
     return nullptr;
 
   WasmCompiler comp;
-  for (Func *f : jitCandidates) {
-    fprintf(stderr, "compiling %p\n", f);
+  for (Func *f : jitCandidates)
     comp.compileFunction(f);
-  }
+  jitCandidates.clear();
   return new WasmModule{comp.finish()};
 }
 
-static uint8_t* moduleData(WasmModule* mod) EXPORT("moduleData") {
-  return mod->data.data();
-}
-static size_t moduleSize(WasmModule* mod) EXPORT("moduleSize") {
-  return mod->data.size();
-}
-static void freeModule(WasmModule* mod) EXPORT("freeModule") {
-  delete mod;
-}
+EXPORT("moduleData")
+uint8_t* moduleData(WasmModule* mod) { return mod->data.data(); }
+EXPORT("moduleSize")
+size_t moduleSize(WasmModule* mod) { return mod->data.size(); }
+EXPORT("freeModule")
+void freeModule(WasmModule* mod) { delete mod; }
 
 #ifdef LIBRARY
-int main () {}
+EXPORT("allocateBytes")
+void* allocateBytes(size_t len) { return malloc(len); }
+EXPORT("freeBytes")
+void freeBytes(void *ptr) { free(ptr); }
 #else
 int main (int argc, char *argv[]) {
   if (argc != 3) {
