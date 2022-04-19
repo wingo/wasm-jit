@@ -27,7 +27,6 @@ def fib_program(count):
 def write_string(string):
     utf8 = string.encode('utf-8')
     ptr = interplib.allocateBytes(len(utf8) + 1)
-    ptr = interplib.allocateBytes(len(utf8) + 1)
     dst = interplib.memory.data_ptr(wasmtime.loader.store)
     for i in range(0,len(utf8)):
         dst[ptr + i] = utf8[i]
