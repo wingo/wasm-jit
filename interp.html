@@ -22,10 +22,6 @@ href="https://github.com/wingo/wasm-jit/">the wasm-jit web page</a> for more inf
 <script type='text/javascript'>
 //<![CDATA[
 async function load_wasm_jit_demo() {
-  let response = await fetch("/interplib.wasm", {credentials:"same-origin"});
-  if (!response.ok) throw new Error("failed to load interplib.wasm");
-  let bytes = await response.arrayBuffer();
-
   let outputParent = 'wasm-jit-log'
   function withOutputToParent(parent, f) {
     let saved = outputParent;
@@ -90,9 +86,11 @@ async function load_wasm_jit_demo() {
     }
   };
 
-  let mod = new WebAssembly.Module(bytes);
   let imports = {env:{throw_error}, wasi_snapshot_preview1};
-  let instance = new WebAssembly.Instance(mod, imports);
+  let {mod, instance} =
+      await WebAssembly.instantiateStreaming(fetch("/interplib.wasm",
+                                                   {credentials:"same-origin"}),
+                                             imports);
 
   // Explicitly initialize, as we build interplib as a WASI reactor,
   // not a WASI command.
