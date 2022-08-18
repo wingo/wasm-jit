@@ -77,7 +77,7 @@ public:
 
 class Prim : public Expr {
 public:
-  enum class Op { LessThan, Sub, Add };
+  enum class Op { Eq, LessThan, Sub, Add, Mul };
 
   const Op op;
   const std::unique_ptr<Expr> lhs;
@@ -276,6 +276,10 @@ class Parser {
         ret = parsePrim(Prim::Op::Sub);
       } else if (matchKeyword("<")) {
         ret = parsePrim(Prim::Op::LessThan);
+      } else if (matchKeyword("eq?")) {
+        ret = parsePrim(Prim::Op::Eq);
+      } else if (matchKeyword("*")) {
+        ret = parsePrim(Prim::Op::Mul);
       } else if (matchKeyword("if")) {
         Expr *test = parseOne();
         Expr *consequent = parseOne();
@@ -622,12 +626,16 @@ static Value
 eval_primcall(Prim::Op op, intptr_t lhs, intptr_t rhs) {
   // FIXME: What to do on overflow.
   switch(op) {
+  case Prim::Op::Eq:
+    return Value(lhs == rhs);
   case Prim::Op::LessThan:
     return Value(lhs < rhs);
   case Prim::Op::Add:
     return Value(lhs + rhs);
   case Prim::Op::Sub:
     return Value(lhs - rhs);
+  case Prim::Op::Mul:
+    return Value(lhs * rhs);
   default:
     signal_error("unexpected primcall op", nullptr);
     return Value(nullptr);
@@ -646,7 +654,8 @@ tail:
   switch (expr->kind) {
   case Expr::Kind::Func: {
     Func *func = static_cast<Func*>(expr);
-    jitCandidates.insert(func);
+    if (!func->jitCode)
+      jitCandidates.insert(func);
     return Value(new(heap) Closure(env, func));
   }
   case Expr::Kind::Var: {
@@ -839,6 +848,7 @@ struct WasmAssembler : public WasmWriter {
     // Numeric operators
     I32Add = 0x6a,
     I32Sub = 0x6b,
+    I32Mul = 0x6c,
     I32And = 0x71,
     I32Or = 0x72,
     I32Xor = 0x73,
@@ -901,6 +911,7 @@ struct WasmAssembler : public WasmWriter {
 
   void emitI32Add() { emitOp(Op::I32Add); }
   void emitI32Sub() { emitOp(Op::I32Sub); }
+  void emitI32Mul() { emitOp(Op::I32Mul); }
   void emitI32And() { emitOp(Op::I32And); }
   void emitI32Or() { emitOp(Op::I32Or); }
   void emitI32Xor() { emitOp(Op::I32Xor); }
@@ -1486,9 +1497,11 @@ class WasmCompiler {
       masm.emitLocalGet(rhs);
       masm.emitValueToSmi();
       switch(prim->op) {
+      case Prim::Op::Eq:       masm.emitI32Eq(); break;
       case Prim::Op::LessThan: masm.emitI32LtS(); break;
       case Prim::Op::Add:      masm.emitI32Add(); break;
       case Prim::Op::Sub:      masm.emitI32Sub(); break;
+      case Prim::Op::Mul:      masm.emitI32Mul(); break;
       default:
         abort();
       }

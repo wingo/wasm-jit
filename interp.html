@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>wasm-jit demo</title>
+  </head>
+<body>
+      
+<b id="wasm-jit-status">loading wasm-jit...</b>
+<div id="wasm-jit-log">
+</div>
+<form id="wasm-jit-form" hidden="1">
+  <label id="wasm-jit-prompt" for="entry">&gt;&nbsp;</label>
+  <input type="text" id="wasm-jit-entry" name="entry"
+         placeholder="(+ 42 27)"
+         size="40" />
+  <p><button type=button id="wasm-jit-jit">Run JIT!</button></p>
+</form>
+<noscript>
+JavaScript disabled, no wasm-jit demo.  See <a
+href="https://github.com/wingo/wasm-jit/">the wasm-jit web page</a> for more information.
+</noscript>
+<script type='text/javascript'>
+//<![CDATA[
+async function load_wasm_jit_demo() {
+  let response = await fetch("/interplib.wasm", {credentials:"same-origin"});
+  if (!response.ok) throw new Error("failed to load interplib.wasm");
+  let bytes = await response.arrayBuffer();
+
+  let outputParent = 'wasm-jit-log'
+  function withOutputToParent(parent, f) {
+    let saved = outputParent;
+    outputParent = parent;
+    try {
+      f();
+    } finally {
+      outputParent = saved;
+    }
+  }
+  function print(html, wrapper='div') {
+    let e = document.createElement(wrapper);
+    e.innerHTML = html
+    $(outputParent).appendChild(e);
+  }
+
+  function throw_error() { throw new Error; }
+  // WASI polyfill that's enough to implement fwrite(stdout, "foo");
+  const wasi_snapshot_preview1 = {
+    fd_close(fd) {
+      print(`closed ${fd}`);
+      return 0;
+    },
+    fd_fdstat_get(fd, fdstat) {
+      if (fd != 1 && fd != 2)
+        return -1;
+      // struct __wasi_fdstat_t {
+      //   uint8_t filetype;
+      //   uint16_t flags;
+      //   uint64_t rights_base;
+      //   uint64_t rights_inheriting;
+      // };
+      let buf = new Uint8Array(instance.exports.memory.buffer, fdstat,
+                               24); // sizeof __wasi_fdstat_t;
+      buf[0] = 2; // __WASI_FILETYPE_CHARACTER_DEVICE
+      buf[1] = 0;
+      for (i = 2; i < 4; i++)
+        buf[i] = 0; // No flags.
+      for (i = 4; i < 8; i++)
+        buf[i] = 0;
+      for (i = 8; i < 24; i++)
+        buf[i] = 0; // Clear rights bitmaps.
+      return 0;
+    },
+    fd_seek(fd, offset, whence, size_out) {
+      // Seems to be unused.
+      print(`seek ${fd}, ${offset}, ${whence}, ${size_out}`);
+      return 0;
+    },
+    fd_write(fd, iov, iocount, error) {
+      let out = '';
+      iov = new Uint32Array(instance.exports.memory.buffer, iov, iocount * 2);
+      for (let i = 0; i < iocount; i++) {
+        let ptr = iov[i * 2]
+        let len = iov[i * 2 + 1]
+        let bytes = new Uint8Array(instance.exports.memory.buffer, ptr, len);
+        for (let b of bytes)
+          out += String.fromCharCode(b);
+      }
+      print(`${out}`, 'pre');
+      return out.length;
+    }
+  };
+
+  let mod = new WebAssembly.Module(bytes);
+  let imports = {env:{throw_error}, wasi_snapshot_preview1};
+  let instance = new WebAssembly.Instance(mod, imports);
+
+  // Explicitly initialize, as we build interplib as a WASI reactor,
+  // not a WASI command.
+  instance.exports._initialize();
+
+  function writeString(str) {
+    let len = str.length + 1;
+    let ptr = instance.exports.allocateBytes(len);
+    let buf = new Uint8Array(instance.exports.memory.buffer, ptr, len);
+    let i = 0;
+    for (let c of str) {
+      let code = c.codePointAt(0);
+      if (code > 127)
+        throw new Error("ascii only, please");
+      buf[i++] = code;
+    }
+    buf[i] = 0;
+    return ptr;
+  }
+
+  function parse(str) {
+    let chars = writeString(str);
+    let expr = instance.exports.parse(chars);
+    // instance.exports.freeBytes(chars);
+    return expr;
+  }
+
+  function eval(expr) {
+    return instance.exports.eval(expr, 1024 * 1024);
+  }
+
+  let alreadyJitted = [];
+  function jit() {
+    let ptr = instance.exports.jitModule()
+    if (!ptr) {
+      print('No pending JIT code.', 'p');
+      return;
+    }
+    let data = instance.exports.moduleData(ptr);
+    let size = instance.exports.moduleSize(ptr);
+    print(`Got ${size} bytes of JIT code.  Patching code into interpreter.`, 'p');
+    let memory = instance.exports.memory;
+    let __indirect_function_table = instance.exports.__indirect_function_table;
+    let bytes = memory.buffer.slice(data, data + size);
+    instance.exports.freeModule(ptr)
+    let mod = new WebAssembly.Module(bytes);
+    let env = {throw_error, memory, __indirect_function_table};
+    let imports = {env};
+    new WebAssembly.Instance(mod, imports);
+    for (let i = 0; i < defCount; i++) {
+      if (alreadyJitted[i])
+        continue;
+      if ($(`results-${i}`).childElementCount == 0)
+        continue;
+      alreadyJitted[i] = true;
+      withOutputToParent(`results-${i}`, () => print('--- jit ---', 'pre'));
+    }
+  }
+
+  let escape = str => {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  };
+  let $ = document.getElementById.bind(document);
+  let defCount = 0;
+  let ignoredDefinitions = new Set();
+  $('wasm-jit-status').innerHTML = "live wasm-jit demo";
+  $('wasm-jit-form').hidden = false;
+  let parseExpr = expr => {
+    print(escape('> ' + expr), 'pre');
+    try {
+      let parsed = parse(expr);
+      console.log(parsed);
+      let def = defCount++;
+      let button = 'eval-' + def;
+      let results = 'results-' + def;
+      print(`<div id='${results}'></div>` +
+            `<p><button id='${button}' type=button>Evaluate</button></p>`);
+      $(button).onclick = event => {
+        withOutputToParent(results, () => {
+          let resultString;
+          try {
+            let start = Date.now();
+            eval(parsed);
+            let elapsed = Date.now() - start;
+            print(`Evaluation took ${elapsed * 0.001} seconds.`)
+          } catch (e) {
+            print(escape(e.toString()), 'pre');
+          }
+        });
+        event.preventDefault();
+      }
+    } catch (e) {
+      print(escape(e.toString()), 'pre');
+    }
+  }
+  let $0 = parseExpr('1');
+  let $1 = parseExpr('((lambda (n) (+ n 42)) 27)');
+  let $2 = parseExpr(`
+(letrec ((fac (lambda (n)
+                (if (eq? n 0) 1 (* n (fac (- n 1)))))))
+  (fac 30))`);
+  let $3 = parseExpr(`
+(letrec ((fib (lambda (n)
+               (if (< n 2)
+                   1
+                   (+ (fib (- n 1))
+                      (fib (- n 2)))))))
+  (fib 30))`);
+  $('wasm-jit-form').onsubmit = event => {
+    let entry = $('wasm-jit-entry');
+    let expr = entry.value;
+    entry.value = '';
+    parseExpr(expr);
+    event.preventDefault();
+  };
+  $('wasm-jit-jit').onclick = event => {
+    jit();
+    event.preventDefault();
+  };
+}
+load_wasm_jit_demo();
+//]]>
+</script>
+</body>
+</html>
