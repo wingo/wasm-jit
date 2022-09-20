@@ -126,7 +126,7 @@ struct Value* interpretCall(struct Expr *body,
 struct Value* call(struct Func *func,
                    struct Value* val) {
   if (func->jitCode) {
-    struct Value* (*f)(struct Value*) = jitCode;
+    struct Value* (*f)(struct Value*) = func->jitCode;
     return f(val);
   } else {
     recordJitCandidate(func);
