@@ -1038,7 +1038,7 @@ struct WasmModuleWriter : WasmWriter {
     emitSectionId(SectionId::Import);
     size_t patchLoc = emitPatchableVarU32();
     size_t start = code.size();
-    // Twp imports: the memory and the indirect call table.
+    // Two imports: the memory and the indirect call table.
     emitVarU32(2);
     emitName("env");
     emitName("memory");
